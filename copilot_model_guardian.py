@@ -3,6 +3,9 @@
  Microsoft Copilot Model Guardian
  Monitors Microsoft Copilot and ensures your preferred AI model is always
  selected — even when Copilot resets it after a new chat or session switch.
+
+ Author: Dmitriy Yevseyev (@DYevseyev)
+ License: MIT
 ==============================================================================
 """
 

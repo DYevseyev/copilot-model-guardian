@@ -108,3 +108,18 @@ pyinstaller --onefile --noconsole --name "CopilotModelGuardian" copilot_model_gu
 - Requires Microsoft Copilot to be **open and signed in** (the guardian waits patiently if Copilot is closed).
 - The **GPT 5.6 Think deeper** option requires an active **Microsoft 365 Copilot subscription** that includes GPT model access.
 - Built and tested on **Windows 11**. Compatible with Windows 10 (64-bit).
+
+---
+
+## 👤 Author & Contributions
+
+Created and maintained by **Dmitriy Yevseyev** ([@DYevseyev](https://github.com/DYevseyev)).
+
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/DYevseyev/copilot-model-guardian/issues).
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
