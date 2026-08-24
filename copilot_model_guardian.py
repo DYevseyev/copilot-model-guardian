@@ -90,9 +90,21 @@ def ensure_desktop_station(logger=None):
         return None
 
 def find_copilot_document(logger=None):
-    """Locate the Copilot Chromium/Edge Render Widget inside active Copilot windows."""
+    """
+    Locate the Copilot UI root and gptModeSwitcher button.
+
+    Tries two strategies in order:
+    Strategy A — Standalone Copilot app (Copilot.exe / M365Copilot.exe):
+        Finds windows with 'copilot' in title/class, then looks for a
+        Chrome_RenderWidgetHostHWND child as the UIA root.
+    Strategy B — Microsoft Teams Copilot tab:
+        Finds TeamsWebView windows with 'copilot' in their title and uses
+        the TeamsWebView HWND directly as the UIA root (no child traversal needed).
+    """
     hdesk = ensure_desktop_station(logger)
-    top_hwnds = []
+
+    standalone_hwnds = []   # Strategy A candidates
+    teams_hwnds      = []   # Strategy B candidates
 
     def enum_top(hwnd, lparam):
         try:
@@ -106,8 +118,15 @@ def find_copilot_document(logger=None):
             user32.GetClassNameW(hwnd, cls_buff, 256)
             cls = cls_buff.value
 
-            if "copilot" in title.lower() or "copilot" in cls.lower():
-                top_hwnds.append(hwnd)
+            low_title = title.lower()
+            low_cls   = cls.lower()
+
+            # Strategy B: Teams Copilot tab — TeamsWebView with 'copilot' in title
+            if cls == "TeamsWebView" and "copilot" in low_title:
+                teams_hwnds.append(hwnd)
+            # Strategy A: standalone Copilot process windows
+            elif "copilot" in low_title or "copilot" in low_cls:
+                standalone_hwnds.append(hwnd)
         except Exception:
             pass
         return True
@@ -116,6 +135,7 @@ def find_copilot_document(logger=None):
     if hdesk:
         user32.EnumDesktopWindows(hdesk, cb, 0)
 
+    # ── Strategy A: Standalone Copilot ──────────────────────────────────────
     render_hwnds = []
     def enum_child(hwnd, lparam):
         try:
@@ -128,12 +148,22 @@ def find_copilot_document(logger=None):
         return True
 
     child_cb = WNDENUMPROC(enum_child)
-    for top_h in top_hwnds:
+    for top_h in standalone_hwnds:
         user32.EnumChildWindows(top_h, child_cb, 0)
 
     for rh in render_hwnds:
         try:
             ctrl = auto.ControlFromHandle(rh)
+            btn = ctrl.ButtonControl(AutomationId='gptModeSwitcher')
+            if btn.Exists(0, 0):
+                return ctrl, btn
+        except Exception:
+            pass
+
+    # ── Strategy B: Teams Copilot tab ───────────────────────────────────────
+    for th in teams_hwnds:
+        try:
+            ctrl = auto.ControlFromHandle(th)
             btn = ctrl.ButtonControl(AutomationId='gptModeSwitcher')
             if btn.Exists(0, 0):
                 return ctrl, btn
