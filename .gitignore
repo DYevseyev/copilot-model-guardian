@@ -1,0 +1,10 @@
+# Build artifacts
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime log (user-generated, not tracked)
+copilot_guardian.log
