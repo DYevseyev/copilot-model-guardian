@@ -199,93 +199,147 @@ def get_current_model_name(btn):
 
 def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=None):
     """
-    Checks if target_model is selected. If not, automatically opens the dropdown and selects it.
+    Checks if target_model is selected. If not, opens the dropdown and selects it.
+
+    Handles two UI layouts:
+    - Standalone Copilot: GPT submenu is a MenuItemControl with ExpandCollapsePattern;
+      target appears as a RadioButtonControl.
+    - Teams Copilot: GPT submenu is a MenuControl clicked to reveal options; target
+      appears as a named GroupControl or TextControl (no RadioButtonControl).
     """
     if logger is None:
         logger = logging.getLogger("CopilotGuardian")
 
     try:
         current_text = get_current_model_name(btn)
-        
+
         # Check if target is already active
         if is_target_model_active(current_text, target_model):
             return True, current_text
 
-        logger.warning(f"Detected non-target model: '{current_text or 'Auto/Unknown'}'. Switching to target: '{target_model}'...")
+        logger.warning(f"Detected non-target model: '{current_text or 'Auto/Unknown'}'. Switching to '{target_model}'...")
 
-        root_web = doc.DocumentControl()
-        if not root_web.Exists(0, 0):
-            root_web = doc
+        # Always search from the full doc root — popup menus in Teams render
+        # outside the DocumentControl subtree, so doc.DocumentControl() misses them.
+        root_web = doc
 
-        # 1. Expand the model switcher dropdown
+        # ── Step 1: Open the model switcher dropdown ─────────────────────────
+        opened = False
         try:
             ec = btn.GetExpandCollapsePattern()
-            if ec and ec.ExpandCollapseState == 0:  # Collapsed
-                ec.Expand()
-                time.sleep(0.3)
+            if ec:
+                if ec.ExpandCollapseState == 0:   # Collapsed → expand
+                    ec.Expand()
+                opened = True
         except Exception:
+            pass
+        if not opened:
             btn.Click(simulateMove=False)
-            time.sleep(0.3)
+        time.sleep(0.4)
 
-        # 2. Find the 'GPT OpenAI' menu item to open sub-menu using BFS
-        gpt_menu = None
+        # ── Step 2: Find & expand the GPT submenu ────────────────────────────
+        # Look for EITHER a MenuItemControl (standalone Copilot) or a MenuControl (Teams).
+        # The target element must have 'gpt' AND 'openai' in its name.
+        gpt_trigger = None
         queue = [root_web]
         while queue:
             curr = queue.pop(0)
             try:
-                if curr.ControlTypeName == 'MenuItemControl' and 'gpt' in curr.Name.lower() and 'openai' in curr.Name.lower():
-                    gpt_menu = curr
+                typ  = curr.ControlTypeName
+                name = (curr.Name or "").lower()
+                if typ in ('MenuItemControl', 'MenuControl') and 'gpt' in name and 'openai' in name:
+                    gpt_trigger = curr
                     break
                 queue.extend(curr.GetChildren())
             except Exception:
                 pass
 
-        if gpt_menu:
+        if gpt_trigger:
+            expanded = False
+            # Try ExpandCollapsePattern first (standalone Copilot path)
             try:
-                gpt_ec = gpt_menu.GetExpandCollapsePattern()
-                if gpt_ec and gpt_ec.ExpandCollapseState == 0:
+                gpt_ec = gpt_trigger.GetExpandCollapsePattern()
+                if gpt_ec and gpt_ec.ExpandCollapseState != 1:  # not already expanded
                     gpt_ec.Expand()
-                else:
-                    gpt_menu.MoveCursorToMyCenter()
+                    expanded = True
             except Exception:
-                gpt_menu.MoveCursorToMyCenter()
-            time.sleep(0.3)
+                pass
+            # Always try Click as well — required for Teams MenuControl
+            try:
+                gpt_trigger.Click(simulateMove=False)
+            except Exception:
+                pass
+            time.sleep(0.4)
 
-        # 3. Locate target radio button using BFS
-        target_radio = None
+        # ── Step 3: Locate and select the target option ───────────────────────
+        # Priority order:
+        #   1. RadioButtonControl matching target name   (standalone Copilot)
+        #   2. GroupControl with exact target name       (Teams expanded row)
+        #   3. TextControl with exact target name        (Teams text label — click parent)
+        target_el   = None
+        target_pref = 99   # lower = better
+
         queue = [root_web]
         while queue:
             curr = queue.pop(0)
             try:
-                if curr.ControlTypeName == 'RadioButtonControl':
-                    if is_target_model_active(curr.Name, target_model):
-                        target_radio = curr
-                        break
+                name = curr.Name or ""
+                typ  = curr.ControlTypeName
+
+                # Must contain both a version indicator AND "think" or the full target
+                # to avoid matching generic labels like "Think deeper" (no GPT version)
+                name_l = name.lower()
+                is_versioned = ('5.6' in name or '5.5' in name)
+                is_match = is_versioned and is_target_model_active(name, target_model)
+
+                if is_match:
+                    pref = {'RadioButtonControl': 0, 'GroupControl': 1, 'TextControl': 2}.get(typ, 3)
+                    if pref < target_pref:
+                        target_el   = curr
+                        target_pref = pref
+
                 queue.extend(curr.GetChildren())
             except Exception:
                 pass
 
-        if target_radio:
+        if target_el:
+            logger.info(f"Found target element: [{target_el.ControlTypeName}] '{target_el.Name}'")
+            selected = False
+            # Try SelectionItemPattern (RadioButtonControl path)
             try:
-                pat = target_radio.GetSelectionItemPattern()
+                pat = target_el.GetSelectionItemPattern()
                 if pat:
                     pat.Select()
-                else:
-                    target_radio.Click(simulateMove=False)
+                    selected = True
             except Exception:
-                target_radio.Click(simulateMove=False)
-            
-            time.sleep(0.3)
+                pass
+            # Fallback: click the element itself or its parent GroupControl
+            if not selected:
+                try:
+                    # If it's a TextControl, click its parent (the GroupControl row)
+                    if target_el.ControlTypeName == 'TextControl':
+                        parent = target_el.GetParentControl()
+                        if parent:
+                            parent.Click(simulateMove=False)
+                        else:
+                            target_el.Click(simulateMove=False)
+                    else:
+                        target_el.Click(simulateMove=False)
+                except Exception:
+                    target_el.Click(simulateMove=False)
+
+            time.sleep(0.4)
             updated_text = get_current_model_name(btn)
-            logger.info(f"Target model selected successfully! Active status: '{updated_text}'")
+            logger.info(f"Model selection applied. Active: '{updated_text}'")
             return True, updated_text
         else:
-            logger.error(f"Could not locate '{target_model}' in flyout menu.")
+            logger.error(f"Could not locate '{target_model}' in the flyout menu.")
             return False, current_text
 
     except Exception as e:
         logger.error(f"Enforce model selection error: {e}")
         return False, ""
+
 
 def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_INTERVAL, log_file=DEFAULT_LOG_FILE, verbose=False):
     """Continuous monitoring loop."""
