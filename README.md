@@ -19,9 +19,11 @@ Just **download the folder** and double-click to start. No setup, no configurati
 
 ## 🎯 What It Does
 
-- **Continuous Monitoring** — Watches the active Copilot window with negligible CPU overhead (<0.1%).
-- **Auto-Enforcement** — Whenever Copilot resets the model back to *Auto*, *Quick response*, or *GPT 5.5* (e.g. after a new chat, app restart, or session switch), it automatically re-selects **GPT 5.6 Think deeper**.
-- **Silent & Non-Intrusive** — Does nothing when the target model is already active.
+- **Multi-Instance Concurrent Protection** — Monitors and protects **Microsoft Teams Copilot** (both dedicated tab and chat channels) and **Standalone M365 Copilot** simultaneously.
+- **Continuous Sub-Second Polling** — Checks UI state every `0.2s` with negligible CPU overhead (<0.1%).
+- **Instant Auto-Enforcement** — Switches non-target models back to **GPT 5.6 Think deeper** in **~0.29 seconds**.
+- **Silent & Non-Intrusive** — Does nothing when your preferred model is already active.
+- **Console Lifecycle Binding** — Closing the Command Prompt window automatically stops the guardian.
 
 ---
 
@@ -30,7 +32,7 @@ Just **download the folder** and double-click to start. No setup, no configurati
 ### Option 1 — Run with Console (See Live Logs)
 Double-click **`start_guardian.bat`**
 
-A terminal window opens showing real-time status. Logs are also saved to `copilot_guardian.log`.
+A terminal window opens showing real-time status. Logs are also saved to `copilot_guardian.log`. Closing the window immediately stops the guardian.
 
 ### Option 2 — Run Silently in Background (No Window)
 Double-click **`start_guardian_background.vbs`**
@@ -51,9 +53,9 @@ To remove auto-start: double-click **`remove_autostart.bat`**
 
 | File | Description |
 |---|---|
-| `CopilotModelGuardian.exe` | Model Guardian standalone binary — no Python needed |
-| `copilot_model_guardian.py` | Model Guardian source script |
-| `start_guardian.bat` | Launch Model Guardian with visible console |
+| `CopilotModelGuardian.exe` | Standalone executable binary — no Python or dependencies needed |
+| `copilot_model_guardian.py` | Full Python source script with UIAutomation engine |
+| `start_guardian.bat` | Launch Model Guardian with live status console |
 | `start_guardian_background.vbs` | Launch Model Guardian silently in background |
 | `stop_guardian.bat` | Stop any running guardian instance |
 | `install_autostart.bat` | Register guardian to Windows Startup |
@@ -65,14 +67,14 @@ To remove auto-start: double-click **`remove_autostart.bat`**
 ## ⚙️ Advanced CLI Options
 
 ```cmd
-CopilotModelGuardian.exe --model "GPT 5.6 Think deeper" --interval 1.5 --log-file copilot_guardian.log
+CopilotModelGuardian.exe --model "GPT 5.6 Think deeper" --interval 0.2 --log-file copilot_guardian.log
 ```
 
 | Flag | Description | Default |
 |---|---|---|
 | `--model` | Target model name to enforce | `"GPT 5.6 Think deeper"` |
-| `--interval` | Polling interval in seconds | `1.5` |
-| `--log-file` | Path to log file | `copilot_guardian.log` (same folder as exe) |
+| `--interval` | Polling interval in seconds | `0.2` |
+| `--log-file` | Path to log file | `copilot_guardian.log` |
 | `--verbose` | Enable detailed debug logging | `False` |
 
 ---
@@ -90,7 +92,7 @@ To rebuild the standalone executable:
 
 ```cmd
 pip install pyinstaller
-pyinstaller --onefile --noconsole --name "CopilotModelGuardian" copilot_model_guardian.py
+pyinstaller --onefile --console --name "CopilotModelGuardian" copilot_model_guardian.py
 ```
 
 ---
