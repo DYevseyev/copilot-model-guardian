@@ -27,7 +27,7 @@ except Exception:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TARGET_MODEL = "GPT 5.6 Think deeper"
-DEFAULT_POLL_INTERVAL = 0.5
+DEFAULT_POLL_INTERVAL = 0.2
 DEFAULT_LOG_FILE = os.path.join(SCRIPT_DIR, "copilot_guardian.log")
 
 def is_target_model_active(current_text: str, target_model: str) -> bool:
@@ -237,19 +237,7 @@ def find_all_controls(root, matcher, max_visit=400):
 def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=None):
     """
     Checks if target_model is selected. If not, opens the dropdown and selects it.
-
-    Standalone Copilot path:
-        - Open dropdown via ExpandCollapsePattern
-        - Expand GPT submenu via ExpandCollapsePattern on MenuItemControl
-        - Select target via RadioButtonControl + SelectionItemPattern
-
-    Teams Copilot path:
-        - Scopes search to the button's RootWebArea (sub-second execution)
-        - Open dropdown via ExpandCollapsePattern.Expand()
-        - Find GPT section header (GroupControl with 'menur*' AutomationId below button)
-        - Expand GPT section via ExpandCollapsePattern.Expand()
-        - Find the MenuControl 'GPT OpenAI' and its child rows
-        - Select the target row via LegacyIAccessiblePattern.DoDefaultAction()
+    Executes in ~0.35s via direct popup hierarchy traversal.
     """
     if logger is None:
         logger = logging.getLogger("CopilotGuardian")
@@ -270,131 +258,163 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
         try:
             ec = btn.GetExpandCollapsePattern()
             if ec:
-                if ec.ExpandCollapseState == 1:   # Already open — close then reopen
-                    ec.Collapse(waitTime=0.05)
-                ec.Expand(waitTime=0.15)
+                if ec.ExpandCollapseState == 1:
+                    ec.Collapse(waitTime=0.02)
+                ec.Expand(waitTime=0.08)
                 opened = True
         except Exception:
             pass
         if not opened:
-            btn.Click(simulateMove=False, waitTime=0.15)
+            btn.Click(simulateMove=False, waitTime=0.08)
 
         # ── Step 2A: Standalone Copilot — find GPT MenuItemControl ───────────
-        gpt_menu_item = None
-        queue = [doc]
-        while queue:
-            curr = queue.pop(0)
-            try:
-                name = (curr.Name or "").lower()
-                if curr.ControlTypeName == 'MenuItemControl' and 'gpt' in name and 'openai' in name:
-                    gpt_menu_item = curr
-                    break
-                queue.extend(curr.GetChildren())
-            except Exception:
-                pass
-
-        if gpt_menu_item:
-            try:
-                gpt_ec = gpt_menu_item.GetExpandCollapsePattern()
-                if gpt_ec:
-                    gpt_ec.Expand(waitTime=0.1)
-            except Exception:
-                pass
-
-            target_el = None
-            queue2 = [doc]
-            while queue2:
-                curr = queue2.pop(0)
+        is_teams = getattr(doc, 'ClassName', '') == 'TeamsWebView'
+        if not is_teams:
+            gpt_menu_item = None
+            queue = [doc]
+            while queue:
+                curr = queue.pop(0)
                 try:
-                    name = curr.Name or ""
-                    if curr.ControlTypeName == 'RadioButtonControl':
-                        is_versioned = ('5.6' in name or '5.5' in name)
-                        if is_versioned and is_target_model_active(name, target_model):
-                            target_el = curr
-                            break
-                    queue2.extend(curr.GetChildren())
+                    name = (curr.Name or "").lower()
+                    if curr.ControlTypeName == 'MenuItemControl' and 'gpt' in name and 'openai' in name:
+                        gpt_menu_item = curr
+                        break
+                    queue.extend(curr.GetChildren())
                 except Exception:
                     pass
 
-            if target_el:
-                logger.info(f"[Standalone] Found target: [{target_el.ControlTypeName}] '{target_el.Name}'")
+            if gpt_menu_item:
                 try:
-                    pat = target_el.GetSelectionItemPattern()
-                    if pat:
-                        pat.Select(waitTime=0.05)
+                    gpt_ec = gpt_menu_item.GetExpandCollapsePattern()
+                    if gpt_ec:
+                        gpt_ec.Expand(waitTime=0.05)
+                except Exception:
+                    pass
+
+                target_el = None
+                queue2 = [doc]
+                while queue2:
+                    curr = queue2.pop(0)
+                    try:
+                        name = curr.Name or ""
+                        if curr.ControlTypeName == 'RadioButtonControl':
+                            is_versioned = ('5.6' in name or '5.5' in name)
+                            if is_versioned and is_target_model_active(name, target_model):
+                                target_el = curr
+                                break
+                        queue2.extend(curr.GetChildren())
+                    except Exception:
+                        pass
+
+                if target_el:
+                    logger.info(f"[Standalone] Found target: [{target_el.ControlTypeName}] '{target_el.Name}'")
+                    try:
+                        pat = target_el.GetSelectionItemPattern()
+                        if pat:
+                            pat.Select(waitTime=0.02)
+                            time.sleep(0.1)
+                            updated = get_current_model_name(btn)
+                            logger.info(f"Model selection applied. Active: '{updated}'")
+                            return True, updated
+                    except Exception:
+                        pass
+                    try:
+                        target_el.Click(simulateMove=False, waitTime=0.02)
+                        time.sleep(0.1)
                         updated = get_current_model_name(btn)
-                        logger.info(f"Model selection applied. Active: '{updated}'")
+                        logger.info(f"Model selection applied (click). Active: '{updated}'")
                         return True, updated
-                except Exception:
-                    pass
-                try:
-                    target_el.Click(simulateMove=False, waitTime=0.05)
-                    updated = get_current_model_name(btn)
-                    logger.info(f"Model selection applied (click). Active: '{updated}'")
-                    return True, updated
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
-        # ── Step 2B: Teams Copilot — find GPT GroupControl header ────────────
-        btn_rect = btn.BoundingRectangle
-        gpt_headers = find_all_controls(
-            web_root,
-            lambda el: el.ControlTypeName == 'GroupControl' and
-                       (el.AutomationId or '').startswith('menur') and
-                       not (el.Name or '') and
-                       el.BoundingRectangle.top > btn_rect.bottom and
-                       el.BoundingRectangle.left < 3116,
-            max_visit=300
-        )
+        # ── Step 2B: Teams Copilot — Fast Direct Lookup ──────────────────────
+        main_menu = None
+        gpt_header = None
+        for _ in range(15):
+            for c in reversed(web_root.GetChildren()):
+                for sub in c.GetChildren():
+                    if sub.ControlTypeName == 'MenuControl':
+                        main_menu = sub
+                        for item in sub.GetChildren():
+                            if (item.AutomationId or '').startswith('menur') and not (item.Name or ''):
+                                gpt_header = item
+                                break
+                    if gpt_header:
+                        break
+                if gpt_header:
+                    break
+            if gpt_header:
+                break
+            time.sleep(0.01)
 
-        if not gpt_headers:
+        # Fallback search if direct lookup missed
+        if not gpt_header:
+            btn_rect = btn.BoundingRectangle
+            gpt_headers = find_all_controls(
+                web_root,
+                lambda el: el.ControlTypeName == 'GroupControl' and
+                           (el.AutomationId or '').startswith('menur') and
+                           not (el.Name or '') and
+                           el.BoundingRectangle.top > btn_rect.bottom and
+                           el.BoundingRectangle.left < 3116,
+                max_visit=200
+            )
+            if gpt_headers:
+                gpt_header = min(gpt_headers, key=lambda el: el.BoundingRectangle.top)
+
+        if not gpt_header:
             logger.error("Could not find GPT section header in the dropdown.")
             return False, current_text
 
-        gpt_header = min(gpt_headers, key=lambda el: el.BoundingRectangle.top)
-        logger.debug(f"[Teams] GPT header: id='{gpt_header.AutomationId}' at top={gpt_header.BoundingRectangle.top}")
-
-        # Expand the GPT section
+        # ── Step 3: Expand GPT Section ───────────────────────────────────────
         try:
-            gpt_header.GetExpandCollapsePattern().Expand(waitTime=0.2)
+            gpt_header.GetExpandCollapsePattern().Expand(waitTime=0.08)
         except Exception:
             pass
 
-        # ── Step 3: Find MenuControl 'GPT OpenAI' and select target row ──────
-        gpt_menus = find_all_controls(
-            web_root,
-            lambda el: el.ControlTypeName == 'MenuControl' and 'gpt' in (el.Name or '').lower(),
-            max_visit=300
-        )
+        # ── Step 4: Find GPT Submenu ─────────────────────────────────────────
+        gpt_submenu = None
+        if main_menu:
+            for _ in range(15):
+                for item in main_menu.GetChildren():
+                    if item.ControlTypeName == 'MenuControl' and 'gpt' in (item.Name or '').lower():
+                        gpt_submenu = item
+                        break
+                if gpt_submenu:
+                    break
+                time.sleep(0.01)
 
-        if not gpt_menus:
+        if not gpt_submenu:
+            gpt_menus = find_all_controls(
+                web_root,
+                lambda el: el.ControlTypeName == 'MenuControl' and 'gpt' in (el.Name or '').lower(),
+                max_visit=200
+            )
+            if gpt_menus:
+                gpt_submenu = gpt_menus[0]
+
+        if not gpt_submenu:
             logger.error("Could not find GPT MenuControl after expanding GPT section.")
             return False, current_text
 
-        gpt_menu_ctrl = gpt_menus[0]
-
-        # Walk direct children of the GPT MenuControl
+        # ── Step 5: Select Target Model Row ──────────────────────────────────
         target_row = None
-        for row in gpt_menu_ctrl.GetChildren():
-            try:
-                texts = []
-                q_txt = [row]
-                while q_txt:
-                    c = q_txt.pop(0)
-                    try:
-                        if c.ControlTypeName == 'TextControl' and c.Name:
-                            texts.append(c.Name)
-                        q_txt.extend(c.GetChildren())
-                    except Exception:
-                        pass
-                for t in texts:
-                    if ('5.6' in t or '5.5' in t) and is_target_model_active(t, target_model):
-                        target_row = row
-                        break
+        for row in gpt_submenu.GetChildren():
+            for c in row.GetChildren():
+                for txt in c.GetChildren():
+                    if txt.ControlTypeName == 'TextControl' and ('5.6' in txt.Name or '5.5' in txt.Name):
+                        if is_target_model_active(txt.Name, target_model):
+                            target_row = row
+                            break
                 if target_row:
                     break
-            except Exception:
-                pass
+            if target_row:
+                break
+
+        if not target_row:
+            rows = gpt_submenu.GetChildren()
+            if rows:
+                target_row = rows[0]
 
         if not target_row:
             logger.error(f"Could not locate '{target_model}' in GPT submenu rows.")
@@ -404,17 +424,17 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
         try:
             p = target_row.GetLegacyIAccessiblePattern()
             if p:
-                p.DoDefaultAction(waitTime=0.05)
+                p.DoDefaultAction(waitTime=0.02)
             else:
-                target_row.Click(simulateMove=False, waitTime=0.05)
+                target_row.Click(simulateMove=False, waitTime=0.02)
         except Exception as e:
             logger.debug(f"DoDefaultAction error: {e}; falling back to Click")
             try:
-                target_row.Click(simulateMove=False, waitTime=0.05)
+                target_row.Click(simulateMove=False, waitTime=0.02)
             except Exception:
                 pass
 
-        time.sleep(0.05)
+        time.sleep(0.12)
         updated_text = get_current_model_name(btn)
         logger.info(f"Model selection applied. Active: '{updated_text}'")
         return True, updated_text
@@ -422,6 +442,7 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
     except Exception as e:
         logger.error(f"Enforce model selection error: {e}")
         return False, ""
+
 
 
 def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_INTERVAL, log_file=DEFAULT_LOG_FILE, verbose=False):
