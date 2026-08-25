@@ -27,7 +27,7 @@ except Exception:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TARGET_MODEL = "GPT 5.6 Think deeper"
-DEFAULT_POLL_INTERVAL = 1.5
+DEFAULT_POLL_INTERVAL = 0.5
 DEFAULT_LOG_FILE = os.path.join(SCRIPT_DIR, "copilot_guardian.log")
 
 def is_target_model_active(current_text: str, target_model: str) -> bool:
@@ -203,22 +203,53 @@ def get_current_model_name(btn):
     except Exception:
         return ""
 
+def get_web_root(btn, doc):
+    """
+    Find the closest DocumentControl ancestor of the button (the web rendering container).
+    Searching within this subtree is 50-100x faster than traversing the whole top-level window.
+    """
+    try:
+        p = btn.GetParentControl()
+        while p:
+            if p.ControlTypeName == 'DocumentControl':
+                return p
+            p = p.GetParentControl()
+    except Exception:
+        pass
+    return doc
+
+def find_all_controls(root, matcher, max_visit=400):
+    """Fast bounded breadth-first search across UI controls."""
+    results = []
+    queue = [root]
+    visited = 0
+    while queue and visited < max_visit:
+        curr = queue.pop(0)
+        visited += 1
+        try:
+            if matcher(curr):
+                results.append(curr)
+            queue.extend(curr.GetChildren())
+        except Exception:
+            pass
+    return results
+
 def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=None):
     """
     Checks if target_model is selected. If not, opens the dropdown and selects it.
 
     Standalone Copilot path:
-        - Open dropdown via ExpandCollapsePattern or Click
+        - Open dropdown via ExpandCollapsePattern
         - Expand GPT submenu via ExpandCollapsePattern on MenuItemControl
         - Select target via RadioButtonControl + SelectionItemPattern
 
     Teams Copilot path:
+        - Scopes search to the button's RootWebArea (sub-second execution)
         - Open dropdown via ExpandCollapsePattern.Expand()
-        - Find GPT section header (GroupControl with 'menur*' AutomationId, positioned
-          below the button) and expand it via ExpandCollapsePattern.Expand()
-        - Find the resulting MenuControl 'GPT OpenAI' and its GroupControl child rows
+        - Find GPT section header (GroupControl with 'menur*' AutomationId below button)
+        - Expand GPT section via ExpandCollapsePattern.Expand()
+        - Find the MenuControl 'GPT OpenAI' and its child rows
         - Select the target row via LegacyIAccessiblePattern.DoDefaultAction()
-          (works from background process without requiring window focus)
     """
     if logger is None:
         logger = logging.getLogger("CopilotGuardian")
@@ -232,7 +263,7 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
 
         logger.warning(f"Detected non-target model: '{current_text or 'Auto/Unknown'}'. Switching to '{target_model}'...")
 
-        root_web = doc
+        web_root = get_web_root(btn, doc)
 
         # ── Step 1: Open the model switcher dropdown ─────────────────────────
         opened = False
@@ -240,20 +271,17 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
             ec = btn.GetExpandCollapsePattern()
             if ec:
                 if ec.ExpandCollapseState == 1:   # Already open — close then reopen
-                    ec.Collapse()
-                    time.sleep(0.3)
-                ec.Expand()
+                    ec.Collapse(waitTime=0.05)
+                ec.Expand(waitTime=0.15)
                 opened = True
         except Exception:
             pass
         if not opened:
-            btn.Click(simulateMove=False)
-        time.sleep(0.7)
+            btn.Click(simulateMove=False, waitTime=0.15)
 
         # ── Step 2A: Standalone Copilot — find GPT MenuItemControl ───────────
-        # MenuItemControl named 'GPT OpenAI' with ExpandCollapsePattern
         gpt_menu_item = None
-        queue = [root_web]
+        queue = [doc]
         while queue:
             curr = queue.pop(0)
             try:
@@ -266,18 +294,15 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
                 pass
 
         if gpt_menu_item:
-            # Standalone Copilot path — expand the GPT submenu
             try:
                 gpt_ec = gpt_menu_item.GetExpandCollapsePattern()
                 if gpt_ec:
-                    gpt_ec.Expand()
+                    gpt_ec.Expand(waitTime=0.1)
             except Exception:
                 pass
-            time.sleep(0.4)
 
-            # Look for RadioButtonControl target (standalone Copilot)
             target_el = None
-            queue2 = [root_web]
+            queue2 = [doc]
             while queue2:
                 curr = queue2.pop(0)
                 try:
@@ -296,17 +321,14 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
                 try:
                     pat = target_el.GetSelectionItemPattern()
                     if pat:
-                        pat.Select()
-                        time.sleep(0.4)
+                        pat.Select(waitTime=0.05)
                         updated = get_current_model_name(btn)
                         logger.info(f"Model selection applied. Active: '{updated}'")
                         return True, updated
                 except Exception:
                     pass
-                # Fallback: click
                 try:
-                    target_el.Click(simulateMove=False)
-                    time.sleep(0.4)
+                    target_el.Click(simulateMove=False, waitTime=0.05)
                     updated = get_current_model_name(btn)
                     logger.info(f"Model selection applied (click). Active: '{updated}'")
                     return True, updated
@@ -314,61 +336,47 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
                     pass
 
         # ── Step 2B: Teams Copilot — find GPT GroupControl header ────────────
-        # The GPT section header is a GroupControl with AutomationId starting
-        # with 'menur', an empty name, and positioned below the button.
         btn_rect = btn.BoundingRectangle
-        gpt_header = None
-        queue3 = [root_web]
-        while queue3:
-            curr = queue3.pop(0)
-            try:
-                if (curr.ControlTypeName == 'GroupControl' and
-                        (curr.AutomationId or '').startswith('menur') and
-                        not (curr.Name or '')):
-                    r = curr.BoundingRectangle
-                    # Must be below the button and on-screen (within 3 screens wide)
-                    if r.top > btn_rect.bottom and r.left < 9999 and r.right > 0:
-                        if gpt_header is None or r.top < gpt_header.BoundingRectangle.top:
-                            gpt_header = curr
-                queue3.extend(curr.GetChildren())
-            except Exception:
-                pass
+        gpt_headers = find_all_controls(
+            web_root,
+            lambda el: el.ControlTypeName == 'GroupControl' and
+                       (el.AutomationId or '').startswith('menur') and
+                       not (el.Name or '') and
+                       el.BoundingRectangle.top > btn_rect.bottom and
+                       el.BoundingRectangle.left < 3116,
+            max_visit=300
+        )
 
-        if not gpt_header:
-            logger.error(f"Could not find GPT section header in the dropdown.")
+        if not gpt_headers:
+            logger.error("Could not find GPT section header in the dropdown.")
             return False, current_text
 
+        gpt_header = min(gpt_headers, key=lambda el: el.BoundingRectangle.top)
         logger.debug(f"[Teams] GPT header: id='{gpt_header.AutomationId}' at top={gpt_header.BoundingRectangle.top}")
 
         # Expand the GPT section
         try:
-            gpt_header.GetExpandCollapsePattern().Expand()
+            gpt_header.GetExpandCollapsePattern().Expand(waitTime=0.2)
         except Exception:
             pass
-        time.sleep(0.7)
 
         # ── Step 3: Find MenuControl 'GPT OpenAI' and select target row ──────
-        gpt_menu_ctrl = None
-        queue4 = [root_web]
-        while queue4:
-            curr = queue4.pop(0)
-            try:
-                if curr.ControlTypeName == 'MenuControl' and 'gpt' in (curr.Name or '').lower():
-                    gpt_menu_ctrl = curr
-                    break
-                queue4.extend(curr.GetChildren())
-            except Exception:
-                pass
+        gpt_menus = find_all_controls(
+            web_root,
+            lambda el: el.ControlTypeName == 'MenuControl' and 'gpt' in (el.Name or '').lower(),
+            max_visit=300
+        )
 
-        if not gpt_menu_ctrl:
+        if not gpt_menus:
             logger.error("Could not find GPT MenuControl after expanding GPT section.")
             return False, current_text
 
-        # Walk direct children of the GPT MenuControl — each is a GroupControl row
+        gpt_menu_ctrl = gpt_menus[0]
+
+        # Walk direct children of the GPT MenuControl
         target_row = None
         for row in gpt_menu_ctrl.GetChildren():
             try:
-                # Scan text inside this row
                 texts = []
                 q_txt = [row]
                 while q_txt:
@@ -379,7 +387,6 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
                         q_txt.extend(c.GetChildren())
                     except Exception:
                         pass
-                # Check if any text in this row matches target
                 for t in texts:
                     if ('5.6' in t or '5.5' in t) and is_target_model_active(t, target_model):
                         target_row = row
@@ -397,18 +404,17 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
         try:
             p = target_row.GetLegacyIAccessiblePattern()
             if p:
-                p.DoDefaultAction()
+                p.DoDefaultAction(waitTime=0.05)
             else:
-                # Fallback: click the row
-                target_row.Click(simulateMove=False)
+                target_row.Click(simulateMove=False, waitTime=0.05)
         except Exception as e:
             logger.debug(f"DoDefaultAction error: {e}; falling back to Click")
             try:
-                target_row.Click(simulateMove=False)
+                target_row.Click(simulateMove=False, waitTime=0.05)
             except Exception:
                 pass
 
-        time.sleep(0.5)
+        time.sleep(0.05)
         updated_text = get_current_model_name(btn)
         logger.info(f"Model selection applied. Active: '{updated_text}'")
         return True, updated_text
@@ -419,7 +425,7 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
 
 
 def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_INTERVAL, log_file=DEFAULT_LOG_FILE, verbose=False):
-    """Continuous monitoring loop."""
+    """Continuous monitoring loop with cached element handles for fast polling."""
     logger = setup_logging(log_file, verbose)
 
     logger.info("=" * 65)
@@ -441,18 +447,31 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
     signal.signal(signal.SIGTERM, sig_handler)
 
     last_status = None
+    cached_doc = None
+    cached_btn = None
 
     while running:
         try:
-            doc, btn = find_copilot_document(logger)
-            if doc and btn:
-                current_mode = get_current_model_name(btn)
-                if not is_target_model_active(current_mode, target_model):
+            # Validate cached handle; re-discover only if missing or closed
+            valid = False
+            if cached_doc and cached_btn:
+                try:
+                    if cached_btn.Exists(0, 0):
+                        valid = True
+                except Exception:
+                    valid = False
+
+            if not valid:
+                cached_doc, cached_btn = find_copilot_document(logger)
+
+            if cached_doc and cached_btn:
+                current_mode = get_current_model_name(cached_btn)
+                if current_mode and not is_target_model_active(current_mode, target_model):
                     logger.info(f"Copilot model changed to '{current_mode}'. Enforcing '{target_model}'...")
-                    enforce_model_selection(doc, btn, target_model, logger)
+                    enforce_model_selection(cached_doc, cached_btn, target_model, logger)
                     last_status = "UPDATED"
                 else:
-                    if last_status != "OK":
+                    if last_status != "OK" and current_mode:
                         logger.info(f"Copilot protected. Model '{current_mode}' is active.")
                         last_status = "OK"
             else:
@@ -461,6 +480,8 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
                     last_status = "NOT_FOUND"
         except Exception as e:
             logger.debug(f"Monitoring loop iteration error: {e}")
+            cached_doc = None
+            cached_btn = None
         
         time.sleep(poll_interval)
 
@@ -478,3 +499,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
