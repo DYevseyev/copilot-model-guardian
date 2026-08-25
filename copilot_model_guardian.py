@@ -97,14 +97,17 @@ def find_copilot_document(logger=None):
     Strategy A — Standalone Copilot app (Copilot.exe / M365Copilot.exe):
         Finds windows with 'copilot' in title/class, then looks for a
         Chrome_RenderWidgetHostHWND child as the UIA root.
-    Strategy B — Microsoft Teams Copilot tab:
-        Finds TeamsWebView windows with 'copilot' in their title and uses
-        the TeamsWebView HWND directly as the UIA root (no child traversal needed).
+    Strategy B — Microsoft Teams (any context):
+        Scans ALL TeamsWebView windows for the gptModeSwitcher button.
+        Covers the dedicated Copilot tab AND Copilot inside any Teams chat
+        or channel (where the window title is the chat name, not 'Copilot').
+        Windows with 'copilot' in the title are checked first as a fast path.
     """
     hdesk = ensure_desktop_station(logger)
 
-    standalone_hwnds = []   # Strategy A candidates
-    teams_hwnds      = []   # Strategy B candidates
+    standalone_hwnds  = []   # Strategy A candidates
+    teams_copilot_tab = []   # Strategy B — dedicated Copilot tab (fast path)
+    teams_other       = []   # Strategy B — all other TeamsWebView windows
 
     def enum_top(hwnd, lparam):
         try:
@@ -121,10 +124,12 @@ def find_copilot_document(logger=None):
             low_title = title.lower()
             low_cls   = cls.lower()
 
-            # Strategy B: Teams Copilot tab — TeamsWebView with 'copilot' in title
-            if cls == "TeamsWebView" and "copilot" in low_title:
-                teams_hwnds.append(hwnd)
-            # Strategy A: standalone Copilot process windows
+            if cls == "TeamsWebView":
+                # Prioritise the dedicated Copilot tab by checking it first
+                if "copilot" in low_title:
+                    teams_copilot_tab.append(hwnd)
+                else:
+                    teams_other.append(hwnd)
             elif "copilot" in low_title or "copilot" in low_cls:
                 standalone_hwnds.append(hwnd)
         except Exception:
@@ -160,8 +165,8 @@ def find_copilot_document(logger=None):
         except Exception:
             pass
 
-    # ── Strategy B: Teams Copilot tab ───────────────────────────────────────
-    for th in teams_hwnds:
+    # ── Strategy B: Teams — dedicated tab first, then all other windows ──────
+    for th in (teams_copilot_tab + teams_other):
         try:
             ctrl = auto.ControlFromHandle(th)
             btn = ctrl.ButtonControl(AutomationId='gptModeSwitcher')
