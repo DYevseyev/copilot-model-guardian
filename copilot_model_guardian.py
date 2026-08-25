@@ -271,12 +271,14 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
         is_teams = getattr(doc, 'ClassName', '') == 'TeamsWebView'
         if not is_teams:
             gpt_menu_item = None
-            queue = [doc]
-            while queue:
+            queue = [doc, web_root]
+            visited = 0
+            while queue and visited < 400:
                 curr = queue.pop(0)
+                visited += 1
                 try:
                     name = (curr.Name or "").lower()
-                    if curr.ControlTypeName == 'MenuItemControl' and 'gpt' in name and 'openai' in name:
+                    if curr.ControlTypeName == 'MenuItemControl' and ('gpt' in name or 'openai' in name):
                         gpt_menu_item = curr
                         break
                     queue.extend(curr.GetChildren())
@@ -287,40 +289,48 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
                 try:
                     gpt_ec = gpt_menu_item.GetExpandCollapsePattern()
                     if gpt_ec:
-                        gpt_ec.Expand(waitTime=0.05)
+                        gpt_ec.Expand(waitTime=0.12)
+                    else:
+                        gpt_menu_item.Click(simulateMove=False, waitTime=0.12)
                 except Exception:
                     pass
 
                 target_el = None
-                queue2 = [doc]
-                while queue2:
-                    curr = queue2.pop(0)
-                    try:
-                        name = curr.Name or ""
-                        if curr.ControlTypeName == 'RadioButtonControl':
-                            is_versioned = ('5.6' in name or '5.5' in name)
-                            if is_versioned and is_target_model_active(name, target_model):
-                                target_el = curr
-                                break
-                        queue2.extend(curr.GetChildren())
-                    except Exception:
-                        pass
+                for _ in range(10): # retry up to 200ms for submenu DOM to render
+                    queue2 = [doc, web_root]
+                    visited2 = 0
+                    while queue2 and visited2 < 400:
+                        curr = queue2.pop(0)
+                        visited2 += 1
+                        try:
+                            name = curr.Name or ""
+                            if curr.ControlTypeName == 'RadioButtonControl':
+                                is_versioned = ('5.6' in name or '5.5' in name)
+                                if is_versioned and is_target_model_active(name, target_model):
+                                    target_el = curr
+                                    break
+                            queue2.extend(curr.GetChildren())
+                        except Exception:
+                            pass
+                    if target_el:
+                        break
+                    time.sleep(0.02)
 
                 if target_el:
                     logger.info(f"[Standalone] Found target: [{target_el.ControlTypeName}] '{target_el.Name}'")
                     try:
                         pat = target_el.GetSelectionItemPattern()
                         if pat:
-                            pat.Select(waitTime=0.02)
-                            time.sleep(0.1)
+                            pat.Select(waitTime=0.05)
+                            time.sleep(0.12)
                             updated = get_current_model_name(btn)
                             logger.info(f"Model selection applied. Active: '{updated}'")
                             return True, updated
                     except Exception:
                         pass
                     try:
-                        target_el.Click(simulateMove=False, waitTime=0.02)
-                        time.sleep(0.1)
+                        target_el.Click(simulateMove=False, waitTime=0.05)
+                        time.sleep(0.12)
                         updated = get_current_model_name(btn)
                         logger.info(f"Model selection applied (click). Active: '{updated}'")
                         return True, updated
