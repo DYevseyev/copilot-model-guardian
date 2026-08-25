@@ -146,40 +146,57 @@ def find_copilot_document(logger=None):
     if hdesk:
         user32.EnumDesktopWindows(hdesk, cb, 0)
 
-    # ── Strategy A: Standalone Copilot ──────────────────────────────────────
-    render_hwnds = []
-    def enum_child(hwnd, lparam):
+    def check_handle_for_switcher(h):
         try:
-            cls_buff = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(hwnd, cls_buff, 256)
-            if cls_buff.value == 'Chrome_RenderWidgetHostHWND':
-                render_hwnds.append(hwnd)
+            ctrl = auto.ControlFromHandle(h)
+            btn = ctrl.ButtonControl(AutomationId='gptModeSwitcher')
+            if btn.Exists(0, 0):
+                return ctrl, btn
+            btn2 = ctrl.ButtonControl(Name='Model Selector')
+            if btn2.Exists(0, 0):
+                return ctrl, btn2
         except Exception:
             pass
-        return True
+        return None, None
 
-    child_cb = WNDENUMPROC(enum_child)
+    # ── Strategy A: Standalone Copilot (M365 Copilot, Edge/PWA Copilot) ─────
     for top_h in standalone_hwnds:
-        user32.EnumChildWindows(top_h, child_cb, 0)
+        # Check child render widgets first
+        child_hwnds = []
+        def enum_child(ch, lparam):
+            try:
+                cls_buff = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(ch, cls_buff, 256)
+                if cls_buff.value in ('Chrome_RenderWidgetHostHWND', 'Intermediate D3D Window'):
+                    child_hwnds.append(ch)
+            except Exception:
+                pass
+            return True
+        user32.EnumChildWindows(top_h, WNDENUMPROC(enum_child), 0)
 
-    for rh in render_hwnds:
-        try:
-            ctrl = auto.ControlFromHandle(rh)
-            btn = ctrl.ButtonControl(AutomationId='gptModeSwitcher')
-            if btn.Exists(0, 0):
+        for ch in (child_hwnds + [top_h]):
+            ctrl, btn = check_handle_for_switcher(ch)
+            if ctrl and btn:
                 return ctrl, btn
-        except Exception:
-            pass
 
-    # ── Strategy B: Teams — dedicated tab first, then all other windows ──────
+    # ── Strategy B: Teams (Dedicated tab first, then chat channels) ─────────
     for th in (teams_copilot_tab + teams_other):
-        try:
-            ctrl = auto.ControlFromHandle(th)
-            btn = ctrl.ButtonControl(AutomationId='gptModeSwitcher')
-            if btn.Exists(0, 0):
+        child_hwnds = []
+        def enum_teams_child(ch, lparam):
+            try:
+                cls_buff = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(ch, cls_buff, 256)
+                if cls_buff.value in ('Chrome_RenderWidgetHostHWND', 'Intermediate D3D Window'):
+                    child_hwnds.append(ch)
+            except Exception:
+                pass
+            return True
+        user32.EnumChildWindows(th, WNDENUMPROC(enum_teams_child), 0)
+
+        for ch in (child_hwnds + [th]):
+            ctrl, btn = check_handle_for_switcher(ch)
+            if ctrl and btn:
                 return ctrl, btn
-        except Exception:
-            pass
 
     return None, None
 
@@ -260,102 +277,94 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
             if ec:
                 if ec.ExpandCollapseState == 1:
                     ec.Collapse(waitTime=0.02)
-                ec.Expand(waitTime=0.08)
+                ec.Expand(waitTime=0.06)
                 opened = True
         except Exception:
             pass
         if not opened:
-            btn.Click(simulateMove=False, waitTime=0.08)
+            btn.Click(simulateMove=False, waitTime=0.06)
 
-        # ── Step 2A: Standalone Copilot — find GPT MenuItemControl ───────────
-        is_teams = getattr(doc, 'ClassName', '') == 'TeamsWebView'
-        if not is_teams:
-            gpt_menu_item = None
-            queue = [doc, web_root]
-            visited = 0
-            while queue and visited < 400:
-                curr = queue.pop(0)
-                visited += 1
-                try:
-                    name = (curr.Name or "").lower()
-                    if curr.ControlTypeName == 'MenuItemControl' and ('gpt' in name or 'openai' in name):
-                        gpt_menu_item = curr
-                        break
-                    queue.extend(curr.GetChildren())
-                except Exception:
-                    pass
-
-            if gpt_menu_item:
-                try:
-                    gpt_ec = gpt_menu_item.GetExpandCollapsePattern()
-                    if gpt_ec:
-                        gpt_ec.Expand(waitTime=0.12)
-                    else:
-                        gpt_menu_item.Click(simulateMove=False, waitTime=0.12)
-                except Exception:
-                    pass
-
-                target_el = None
-                for _ in range(10): # retry up to 200ms for submenu DOM to render
-                    queue2 = [doc, web_root]
-                    visited2 = 0
-                    while queue2 and visited2 < 400:
-                        curr = queue2.pop(0)
-                        visited2 += 1
-                        try:
-                            name = curr.Name or ""
-                            if curr.ControlTypeName == 'RadioButtonControl':
-                                is_versioned = ('5.6' in name or '5.5' in name)
-                                if is_versioned and is_target_model_active(name, target_model):
-                                    target_el = curr
-                                    break
-                            queue2.extend(curr.GetChildren())
-                        except Exception:
-                            pass
-                    if target_el:
-                        break
-                    time.sleep(0.02)
-
-                if target_el:
-                    logger.info(f"[Standalone] Found target: [{target_el.ControlTypeName}] '{target_el.Name}'")
-                    try:
-                        pat = target_el.GetSelectionItemPattern()
-                        if pat:
-                            pat.Select(waitTime=0.05)
-                            time.sleep(0.12)
-                            updated = get_current_model_name(btn)
-                            logger.info(f"Model selection applied. Active: '{updated}'")
-                            return True, updated
-                    except Exception:
-                        pass
-                    try:
-                        target_el.Click(simulateMove=False, waitTime=0.05)
-                        time.sleep(0.12)
-                        updated = get_current_model_name(btn)
-                        logger.info(f"Model selection applied (click). Active: '{updated}'")
-                        return True, updated
-                    except Exception:
-                        pass
-
-        # ── Step 2B: Teams Copilot — Fast Direct Lookup ──────────────────────
+        # ── Step 2: Unified Fast Direct Lookup in web_root ────────────────────
         main_menu = None
         gpt_header = None
+        gpt_menu_item = None
+
+        # Look in reverse child order (where popups are attached)
         for _ in range(15):
             for c in reversed(web_root.GetChildren()):
+                # Direct menu check
                 for sub in c.GetChildren():
-                    if sub.ControlTypeName == 'MenuControl':
+                    typ = sub.ControlTypeName
+                    if typ == 'MenuControl':
                         main_menu = sub
                         for item in sub.GetChildren():
-                            if (item.AutomationId or '').startswith('menur') and not (item.Name or ''):
+                            aid = item.AutomationId or ''
+                            name = (item.Name or '').lower()
+                            if aid.startswith(('menur', 'menu_r')) and not item.Name:
                                 gpt_header = item
                                 break
-                    if gpt_header:
+                            if item.ControlTypeName == 'MenuItemControl' and ('gpt' in name or 'openai' in name):
+                                gpt_menu_item = item
+                                break
+                    elif typ == 'MenuItemControl':
+                        name = (sub.Name or '').lower()
+                        if 'gpt' in name or 'openai' in name:
+                            gpt_menu_item = sub
+                            break
+                    if gpt_header or gpt_menu_item:
                         break
-                if gpt_header:
+                if gpt_header or gpt_menu_item:
                     break
-            if gpt_header:
+            if gpt_header or gpt_menu_item:
                 break
             time.sleep(0.01)
+
+        # Handle Standalone MenuItemControl path
+        if gpt_menu_item:
+            try:
+                m_ec = gpt_menu_item.GetExpandCollapsePattern()
+                if m_ec:
+                    m_ec.Expand(waitTime=0.06)
+                else:
+                    gpt_menu_item.Click(simulateMove=False, waitTime=0.06)
+            except Exception:
+                pass
+
+            target_el = None
+            for _ in range(10):
+                for c in reversed(web_root.GetChildren()):
+                    for sub in c.GetChildren():
+                        if sub.ControlTypeName == 'RadioButtonControl':
+                            name = sub.Name or ""
+                            if ('5.6' in name or '5.5' in name) and is_target_model_active(name, target_model):
+                                target_el = sub
+                                break
+                    if target_el:
+                        break
+                if target_el:
+                    break
+                time.sleep(0.01)
+
+            if target_el:
+                logger.info(f"[Standalone] Found target: [{target_el.ControlTypeName}] '{target_el.Name}'")
+                try:
+                    pat = target_el.GetSelectionItemPattern()
+                    if pat:
+                        pat.Select(waitTime=0.02)
+                    else:
+                        target_el.Click(simulateMove=False, waitTime=0.02)
+                except Exception:
+                    try: target_el.Click(simulateMove=False, waitTime=0.02)
+                    except: pass
+
+                # Adaptive verification loop
+                for _ in range(10):
+                    time.sleep(0.015)
+                    updated = get_current_model_name(btn)
+                    if is_target_model_active(updated, target_model):
+                        logger.info(f"Model selection verified active: '{updated}'")
+                        return True, updated
+                return True, get_current_model_name(btn)
 
         # Fallback search if direct lookup missed
         if not gpt_header:
@@ -363,7 +372,7 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
             gpt_headers = find_all_controls(
                 web_root,
                 lambda el: el.ControlTypeName == 'GroupControl' and
-                           (el.AutomationId or '').startswith('menur') and
+                           (el.AutomationId or '').startswith(('menur', 'menu_r')) and
                            not (el.Name or '') and
                            el.BoundingRectangle.top > btn_rect.bottom and
                            el.BoundingRectangle.left < 3116,
@@ -378,7 +387,7 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
 
         # ── Step 3: Expand GPT Section ───────────────────────────────────────
         try:
-            gpt_header.GetExpandCollapsePattern().Expand(waitTime=0.08)
+            gpt_header.GetExpandCollapsePattern().Expand(waitTime=0.06)
         except Exception:
             pass
 
@@ -430,7 +439,7 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
             logger.error(f"Could not locate '{target_model}' in GPT submenu rows.")
             return False, current_text
 
-        logger.info(f"[Teams] Selecting target row via DoDefaultAction...")
+        logger.info(f"Selecting target model row via DoDefaultAction...")
         try:
             p = target_row.GetLegacyIAccessiblePattern()
             if p:
@@ -444,7 +453,14 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
             except Exception:
                 pass
 
-        time.sleep(0.12)
+        # Adaptive verification loop (polls up to 100ms)
+        for _ in range(10):
+            time.sleep(0.015)
+            updated_text = get_current_model_name(btn)
+            if is_target_model_active(updated_text, target_model):
+                logger.info(f"Model selection verified active: '{updated_text}'")
+                return True, updated_text
+
         updated_text = get_current_model_name(btn)
         logger.info(f"Model selection applied. Active: '{updated_text}'")
         return True, updated_text
@@ -501,6 +517,15 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
                     logger.info(f"Copilot model changed to '{current_mode}'. Enforcing '{target_model}'...")
                     enforce_model_selection(cached_doc, cached_btn, target_model, logger)
                     last_status = "UPDATED"
+                elif not current_mode:
+                    # Handle is stale/disconnected — re-discover immediately without delay
+                    cached_doc, cached_btn = find_copilot_document(logger)
+                    if cached_btn:
+                        current_mode = get_current_model_name(cached_btn)
+                        if current_mode and not is_target_model_active(current_mode, target_model):
+                            logger.info(f"Copilot model changed to '{current_mode}'. Enforcing '{target_model}'...")
+                            enforce_model_selection(cached_doc, cached_btn, target_model, logger)
+                            last_status = "UPDATED"
                 else:
                     if last_status != "OK" and current_mode:
                         logger.info(f"Copilot protected. Model '{current_mode}' is active.")
