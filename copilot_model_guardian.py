@@ -453,12 +453,32 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
+    # Attach Windows Console Control Handler to exit immediately when CMD window is closed (X clicked)
+    kernel32 = ctypes.windll.kernel32
+    PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+    def console_ctrl_handler(ctrl_type):
+        nonlocal running
+        logger.info(f"Console close/exit event received ({ctrl_type}). Exiting...")
+        running = False
+        sys.exit(0)
+        return True
+
+    ctrl_cb = PHANDLER_ROUTINE(console_ctrl_handler)
+    kernel32.SetConsoleCtrlHandler(ctrl_cb, True)
+
+    hwnd_console = kernel32.GetConsoleWindow()
+
     last_status = None
     cached_doc = None
     cached_btn = None
 
     while running:
         try:
+            # If launched from a console and the console window was closed, exit immediately
+            if hwnd_console and not user32.IsWindow(hwnd_console):
+                logger.info("Parent console window closed. Exiting...")
+                break
             # Validate cached handle; re-discover only if missing or closed
             valid = False
             if cached_doc and cached_btn:
