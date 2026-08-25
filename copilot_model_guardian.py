@@ -95,26 +95,14 @@ def ensure_desktop_station(logger=None):
             logger.debug(f"Desktop station binding notice: {e}")
         return None
 
-def find_copilot_document(logger=None):
+def find_all_copilot_instances(logger=None):
     """
-    Locate the Copilot UI root and gptModeSwitcher button.
-
-    Tries two strategies in order:
-    Strategy A — Standalone Copilot app (Copilot.exe / M365Copilot.exe):
-        Finds windows with 'copilot' in title/class, then looks for a
-        Chrome_RenderWidgetHostHWND child as the UIA root.
-    Strategy B — Microsoft Teams (any context):
-        Scans ALL TeamsWebView windows for the gptModeSwitcher button.
-        Covers the dedicated Copilot tab AND Copilot inside any Teams chat
-        or channel (where the window title is the chat name, not 'Copilot').
-        Windows with 'copilot' in the title are checked first as a fast path.
+    Locate ALL active Copilot UI instances across Microsoft Teams and Standalone Copilot.
+    Returns a list of (ctrl, btn, description) tuples.
     """
     hdesk = ensure_desktop_station(logger)
 
-    standalone_hwnds  = []   # Strategy A candidates
-    teams_copilot_tab = []   # Strategy B — dedicated Copilot tab (fast path)
-    teams_other       = []   # Strategy B — all other TeamsWebView windows
-
+    top_hwnds = []
     def enum_top(hwnd, lparam):
         try:
             length = user32.GetWindowTextLengthW(hwnd)
@@ -130,14 +118,8 @@ def find_copilot_document(logger=None):
             low_title = title.lower()
             low_cls   = cls.lower()
 
-            if cls == "TeamsWebView":
-                # Prioritise the dedicated Copilot tab by checking it first
-                if "copilot" in low_title:
-                    teams_copilot_tab.append(hwnd)
-                else:
-                    teams_other.append(hwnd)
-            elif "copilot" in low_title or "copilot" in low_cls:
-                standalone_hwnds.append(hwnd)
+            if cls == "TeamsWebView" or "copilot" in low_title or "copilot" in low_cls or "m365" in low_title or "m365" in low_cls:
+                top_hwnds.append((hwnd, cls, title))
         except Exception:
             pass
         return True
@@ -146,22 +128,9 @@ def find_copilot_document(logger=None):
     if hdesk:
         user32.EnumDesktopWindows(hdesk, cb, 0)
 
-    def check_handle_for_switcher(h):
-        try:
-            ctrl = auto.ControlFromHandle(h)
-            btn = ctrl.ButtonControl(AutomationId='gptModeSwitcher')
-            if btn.Exists(0, 0):
-                return ctrl, btn
-            btn2 = ctrl.ButtonControl(Name='Model Selector')
-            if btn2.Exists(0, 0):
-                return ctrl, btn2
-        except Exception:
-            pass
-        return None, None
-
-    # ── Strategy A: Standalone Copilot (M365 Copilot, Edge/PWA Copilot) ─────
-    for top_h in standalone_hwnds:
-        # Check child render widgets first
+    found = []
+    seen_hwnds = set()
+    for top_h, cls, title in top_hwnds:
         child_hwnds = []
         def enum_child(ch, lparam):
             try:
@@ -175,29 +144,27 @@ def find_copilot_document(logger=None):
         user32.EnumChildWindows(top_h, WNDENUMPROC(enum_child), 0)
 
         for ch in (child_hwnds + [top_h]):
-            ctrl, btn = check_handle_for_switcher(ch)
-            if ctrl and btn:
-                return ctrl, btn
-
-    # ── Strategy B: Teams (Dedicated tab first, then chat channels) ─────────
-    for th in (teams_copilot_tab + teams_other):
-        child_hwnds = []
-        def enum_teams_child(ch, lparam):
+            if ch in seen_hwnds:
+                continue
             try:
-                cls_buff = ctypes.create_unicode_buffer(256)
-                user32.GetClassNameW(ch, cls_buff, 256)
-                if cls_buff.value in ('Chrome_RenderWidgetHostHWND', 'Intermediate D3D Window'):
-                    child_hwnds.append(ch)
+                ctrl = auto.ControlFromHandle(ch)
+                btn = ctrl.ButtonControl(AutomationId='gptModeSwitcher')
+                if not btn.Exists(0, 0):
+                    btn = ctrl.ButtonControl(Name='Model Selector')
+                if btn.Exists(0, 0):
+                    seen_hwnds.add(ch)
+                    found.append((ctrl, btn, f"{cls} '{title}'"))
+                    break
             except Exception:
                 pass
-            return True
-        user32.EnumChildWindows(th, WNDENUMPROC(enum_teams_child), 0)
 
-        for ch in (child_hwnds + [th]):
-            ctrl, btn = check_handle_for_switcher(ch)
-            if ctrl and btn:
-                return ctrl, btn
+    return found
 
+def find_copilot_document(logger=None):
+    """Compatibility helper: returns the first active Copilot instance."""
+    instances = find_all_copilot_instances(logger)
+    if instances:
+        return instances[0][0], instances[0][1]
     return None, None
 
 def get_current_model_name(btn):
@@ -254,7 +221,7 @@ def find_all_controls(root, matcher, max_visit=400):
 def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=None):
     """
     Checks if target_model is selected. If not, opens the dropdown and selects it.
-    Executes in ~0.35s via direct popup hierarchy traversal.
+    Executes in ~0.29s via unified multi-level popup hierarchy traversal.
     """
     if logger is None:
         logger = logging.getLogger("CopilotGuardian")
@@ -277,12 +244,12 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
             if ec:
                 if ec.ExpandCollapseState == 1:
                     ec.Collapse(waitTime=0.02)
-                ec.Expand(waitTime=0.05)
+                ec.Expand(waitTime=0.06)
                 opened = True
         except Exception:
             pass
         if not opened:
-            btn.Click(simulateMove=False, waitTime=0.05)
+            btn.Click(simulateMove=False, waitTime=0.06)
 
         # ── Step 2: Find GPT Section Trigger in Popups ────────────────────────
         gpt_trigger = None
@@ -290,20 +257,15 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
             children = web_root.GetChildren()
             popup_nodes = children[-3:] if len(children) >= 3 else children
             for c in reversed(popup_nodes):
-                queue = [c]
-                while queue:
-                    curr = queue.pop(0)
-                    typ = curr.ControlTypeName
-                    name = (curr.Name or '').lower()
-                    aid = curr.AutomationId or ''
-                    if typ == 'MenuItemControl' and ('gpt' in name or 'openai' in name):
-                        gpt_trigger = curr
+                for sub, d in auto.WalkControl(c, lambda s, d: True, maxDepth=3):
+                    aid = sub.AutomationId or ''
+                    name = (sub.Name or '').lower()
+                    if aid.startswith(('menur', 'menu_r')) and not sub.Name:
+                        gpt_trigger = sub
                         break
-                    if typ == 'GroupControl' and aid.startswith(('menur', 'menu_r')) and not curr.Name:
-                        gpt_trigger = curr
+                    if sub.ControlTypeName == 'MenuItemControl' and ('gpt' in name or 'openai' in name):
+                        gpt_trigger = sub
                         break
-                    try: queue.extend(curr.GetChildren())
-                    except: pass
                 if gpt_trigger:
                     break
             if gpt_trigger:
@@ -334,11 +296,11 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
         try:
             t_ec = gpt_trigger.GetExpandCollapsePattern()
             if t_ec:
-                t_ec.Expand(waitTime=0.05)
+                t_ec.Expand(waitTime=0.06)
             else:
-                gpt_trigger.Click(simulateMove=False, waitTime=0.05)
+                gpt_trigger.Click(simulateMove=False, waitTime=0.06)
         except Exception:
-            try: gpt_trigger.Click(simulateMove=False, waitTime=0.05)
+            try: gpt_trigger.Click(simulateMove=False, waitTime=0.06)
             except: pass
 
         # ── Step 4: Multi-Level Search for Target Model Row ──────────────────
@@ -347,24 +309,27 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
             children = web_root.GetChildren()
             popup_nodes = children[-3:] if len(children) >= 3 else children
             for c in reversed(popup_nodes):
-                queue = [c]
-                while queue:
-                    curr = queue.pop(0)
-                    try:
-                        name = curr.Name or ""
-                        if ('5.6' in name or '5.5' in name) and is_target_model_active(name, target_model):
-                            target_row = curr
+                for sub, d in auto.WalkControl(c, lambda s, d: True, maxDepth=5):
+                    name = sub.Name or ''
+                    # Standalone RadioButtonControl check
+                    if sub.ControlTypeName == 'RadioButtonControl' and ('5.6' in name or '5.5' in name) and is_target_model_active(name, target_model):
+                        target_row = sub
+                        break
+                    # Teams MenuControl check
+                    if sub.ControlTypeName == 'MenuControl' and 'gpt' in name.lower():
+                        rows = sub.GetChildren()
+                        if rows:
+                            for r in rows:
+                                for txt in r.GetChildren():
+                                    for t in txt.GetChildren():
+                                        if '5.6' in (t.Name or '') and is_target_model_active(t.Name, target_model):
+                                            target_row = r
+                                            break
+                                    if target_row: break
+                                if target_row: break
+                            if not target_row:
+                                target_row = rows[0]
                             break
-                        for sub in curr.GetChildren():
-                            if sub.ControlTypeName == 'TextControl' and ('5.6' in (sub.Name or '') or '5.5' in (sub.Name or '')):
-                                if is_target_model_active(sub.Name, target_model):
-                                    target_row = curr
-                                    break
-                        if target_row:
-                            break
-                        queue.extend(curr.GetChildren())
-                    except Exception:
-                        pass
                 if target_row:
                     break
             if target_row:
@@ -391,18 +356,18 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
         logger.info(f"Activating target model row: [{target_row.ControlTypeName}] '{target_row.Name}'")
         activated = False
         try:
-            p_sel = target_row.GetSelectionItemPattern()
-            if p_sel:
-                p_sel.Select(waitTime=0.02)
+            p = target_row.GetLegacyIAccessiblePattern()
+            if p:
+                p.DoDefaultAction(waitTime=0.02)
                 activated = True
         except Exception:
             pass
 
         if not activated:
             try:
-                p = target_row.GetLegacyIAccessiblePattern()
-                if p:
-                    p.DoDefaultAction(waitTime=0.02)
+                p_sel = target_row.GetSelectionItemPattern()
+                if p_sel:
+                    p_sel.Select(waitTime=0.02)
                     activated = True
             except Exception:
                 pass
@@ -432,7 +397,7 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
 
 
 def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_INTERVAL, log_file=DEFAULT_LOG_FILE, verbose=False):
-    """Continuous monitoring loop with cached element handles for fast polling."""
+    """Continuous monitoring loop protecting ALL active Copilot instances simultaneously."""
     logger = setup_logging(log_file, verbose)
 
     logger.info("=" * 65)
@@ -470,8 +435,7 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
     hwnd_console = kernel32.GetConsoleWindow()
 
     last_status = None
-    cached_doc = None
-    cached_btn = None
+    cached_instances = []
 
     while running:
         try:
@@ -479,46 +443,48 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
             if hwnd_console and not user32.IsWindow(hwnd_console):
                 logger.info("Parent console window closed. Exiting...")
                 break
-            # Validate cached handle; re-discover only if missing or closed
-            valid = False
-            if cached_doc and cached_btn:
+
+            # Validate all cached instance handles
+            valid_instances = []
+            for ctrl, btn, desc in cached_instances:
                 try:
-                    if cached_btn.Exists(0, 0):
-                        valid = True
+                    if btn.Exists(0, 0):
+                        valid_instances.append((ctrl, btn, desc))
                 except Exception:
-                    valid = False
+                    pass
 
-            if not valid:
-                cached_doc, cached_btn = find_copilot_document(logger)
+            # Re-discover if any instance was lost or no instances cached
+            if len(valid_instances) != len(cached_instances) or not valid_instances:
+                cached_instances = find_all_copilot_instances(logger)
+            else:
+                cached_instances = valid_instances
 
-            if cached_doc and cached_btn:
-                current_mode = get_current_model_name(cached_btn)
-                if current_mode and not is_target_model_active(current_mode, target_model):
-                    logger.info(f"Copilot model changed to '{current_mode}'. Enforcing '{target_model}'...")
-                    enforce_model_selection(cached_doc, cached_btn, target_model, logger)
-                    last_status = "UPDATED"
-                elif not current_mode:
-                    # Handle is stale/disconnected — re-discover immediately without delay
-                    cached_doc, cached_btn = find_copilot_document(logger)
-                    if cached_btn:
-                        current_mode = get_current_model_name(cached_btn)
-                        if current_mode and not is_target_model_active(current_mode, target_model):
-                            logger.info(f"Copilot model changed to '{current_mode}'. Enforcing '{target_model}'...")
-                            enforce_model_selection(cached_doc, cached_btn, target_model, logger)
-                            last_status = "UPDATED"
-                else:
-                    if last_status != "OK" and current_mode:
-                        logger.info(f"Copilot protected. Model '{current_mode}' is active.")
-                        last_status = "OK"
+            if cached_instances:
+                all_ok = True
+                for ctrl, btn, desc in cached_instances:
+                    current_mode = get_current_model_name(btn)
+                    if current_mode and not is_target_model_active(current_mode, target_model):
+                        all_ok = False
+                        logger.info(f"[{desc}] Model changed to '{current_mode}'. Enforcing '{target_model}'...")
+                        enforce_model_selection(ctrl, btn, target_model, logger)
+                        last_status = "UPDATED"
+                    elif not current_mode:
+                        # Handle stale -> force re-discovery on next loop
+                        cached_instances = []
+                        all_ok = False
+                        break
+
+                if all_ok and last_status != "OK":
+                    active_desc = ", ".join([f"{d} ('{get_current_model_name(b)}')" for _, b, d in cached_instances])
+                    logger.info(f"Copilot protected ({len(cached_instances)} active instance(s)): {active_desc}")
+                    last_status = "OK"
             else:
                 if last_status != "NOT_FOUND":
                     logger.info("Monitoring active. Waiting for Copilot window / conversation...")
                     last_status = "NOT_FOUND"
         except Exception as e:
             logger.debug(f"Monitoring loop iteration error: {e}")
-            cached_doc = None
-            cached_btn = None
-        
+            cached_instances = []
         time.sleep(poll_interval)
 
     logger.info("Copilot Model Guardian stopped.")
