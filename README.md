@@ -51,14 +51,38 @@ To remove auto-start: double-click **`remove_autostart.bat`**
 
 | File | Description |
 |---|---|
-| `CopilotModelGuardian.exe` | Standalone executable — no Python needed |
-| `copilot_model_guardian.py` | Source script (requires Python + dependencies) |
-| `start_guardian.bat` | Launch with a visible console window |
-| `start_guardian_background.vbs` | Launch silently in the background |
+| `CopilotModelGuardian.exe` | Model Guardian standalone binary — no Python needed |
+| `copilot_model_guardian.py` | Model Guardian source script |
+| `start_guardian.bat` | Launch Model Guardian with visible console |
+| `start_guardian_background.vbs` | Launch Model Guardian silently in background |
 | `stop_guardian.bat` | Stop any running guardian instance |
 | `install_autostart.bat` | Register guardian to Windows Startup |
 | `remove_autostart.bat` | Remove guardian from Windows Startup |
+| `PuttyCopilotBridge.exe` | PuTTY to Copilot Smart Bridge standalone binary |
+| `putty_copilot_bridge.py` | Smart Bridge & Autonomous Loop source script |
+| `start_putty_bridge.bat` | Interactive launcher for PuTTY to Copilot Bridge |
 | `requirements.txt` | Python dependencies (for source usage) |
+
+---
+
+## ⚡ PuTTY to Copilot Smart Bridge & Autonomous Loop
+
+Connect your **PuTTY / SSH terminal sessions** directly to **Microsoft Copilot** without dumping thousands of lines of scrollback.
+
+### Features
+- **Smart Delta Buffer** — Captures only the newest command output since the previous prompt.
+- **ANSI Escape Sequence Cleaner** — Strips terminal colors and escape codes before sending to AI.
+- **Threshold Gating** — Ignores tiny keystroke echoes, cursor blinks, and shell prompts (`user@host:~$`).
+- **Rolling Deduplication Memory** — Remembers recent outputs in memory so identical logs are never re-sent.
+- **Safe by Default (Manual Mode)** — Automatically stages clean output on your clipboard; press `[Space]` to send to Copilot.
+- **Autonomous Loop Mode (`[T]` / `F9`)** — Allows Copilot and PuTTY to converse back-and-forth automatically (Terminal Output ➔ Copilot Analysis ➔ Extracted Bash Command Execution ➔ Repeat).
+- **Safety Circuit Breakers** — Automatically halts auto-mode on password prompts (`sudo`, `password:`), interactive queries (`[y/N]`), or `Esc` key.
+
+### Quick Start
+Double-click **`start_putty_bridge.bat`**
+- Press **`[T]`** to toggle Autonomous Loop (ON / OFF)
+- Press **`[Space]`** to manually send the currently staged terminal output to Copilot
+- Press **`[Q]`** to quit
 
 ---
 
