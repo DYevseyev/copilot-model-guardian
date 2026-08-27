@@ -402,13 +402,15 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
 
     logger.info("=" * 65)
     logger.info("   MICROSOFT COPILOT MODEL GUARDIAN ACTIVE")
-    logger.info(f"   Target Model : {target_model}")
-    logger.info(f"   Poll Interval: {poll_interval}s")
+    logger.info(f"   Target Model       : {target_model}")
+    logger.info(f"   Poll Interval      : {poll_interval}s")
+    logger.info(f"   Action Counter     : Initialized (0 enforcements)")
     if log_file:
-        logger.info(f"   Log File     : {os.path.abspath(log_file)}")
+        logger.info(f"   Log File           : {os.path.abspath(log_file)}")
     logger.info("=" * 65)
 
     running = True
+    action_count = 0
 
     def sig_handler(signum, frame):
         nonlocal running
@@ -433,6 +435,14 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
     kernel32.SetConsoleCtrlHandler(ctrl_cb, True)
 
     hwnd_console = kernel32.GetConsoleWindow()
+
+    def update_console_title(count):
+        try:
+            kernel32.SetConsoleTitleW(f"Copilot Model Guardian [Actions: {count}] — {target_model}")
+        except Exception:
+            pass
+
+    update_console_title(0)
 
     last_status = None
     cached_instances = []
@@ -466,7 +476,11 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
                     if current_mode and not is_target_model_active(current_mode, target_model):
                         all_ok = False
                         logger.info(f"[{desc}] Model changed to '{current_mode}'. Enforcing '{target_model}'...")
-                        enforce_model_selection(ctrl, btn, target_model, logger)
+                        ok, final_text = enforce_model_selection(ctrl, btn, target_model, logger)
+                        if ok:
+                            action_count += 1
+                            update_console_title(action_count)
+                            logger.info(f"⚡ [ACTION #{action_count}] Successfully switched {desc} to '{final_text}' (Total Actions: {action_count})")
                         last_status = "UPDATED"
                     elif not current_mode:
                         # Handle stale -> force re-discovery on next loop
@@ -476,7 +490,7 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
 
                 if all_ok and last_status != "OK":
                     active_desc = ", ".join([f"{d} ('{get_current_model_name(b)}')" for _, b, d in cached_instances])
-                    logger.info(f"Copilot protected ({len(cached_instances)} active instance(s)): {active_desc}")
+                    logger.info(f"Copilot protected ({len(cached_instances)} active instance(s) | Total Actions: {action_count}): {active_desc}")
                     last_status = "OK"
             else:
                 if last_status != "NOT_FOUND":
@@ -487,7 +501,7 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
             cached_instances = []
         time.sleep(poll_interval)
 
-    logger.info("Copilot Model Guardian stopped.")
+    logger.info(f"Copilot Model Guardian stopped. Total enforcements in this session: {action_count}")
 
 def main():
     parser = argparse.ArgumentParser(description="Microsoft Copilot Model Guardian")
