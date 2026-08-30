@@ -95,16 +95,39 @@ def ensure_desktop_station(logger=None):
             logger.debug(f"Desktop station binding notice: {e}")
         return None
 
+def is_workstation_locked():
+    """Returns True if the workstation is locked or running on a secure desktop (logon/lock screen)."""
+    try:
+        hdesk_in = user32.OpenInputDesktop(0, False, 0x01FF)
+        if not hdesk_in:
+            return True
+        name_buf = ctypes.create_unicode_buffer(256)
+        needed = wintypes.DWORD()
+        user32.GetUserObjectInformationW(hdesk_in, 2, name_buf, ctypes.sizeof(name_buf), ctypes.byref(needed))
+        desk_name = name_buf.value.lower()
+        user32.CloseDesktop(hdesk_in)
+        return desk_name != 'default'
+    except Exception:
+        return False
+
 def find_all_copilot_instances(logger=None):
     """
-    Locate ALL active Copilot UI instances across Microsoft Teams and Standalone Copilot.
+    Locate ALL active, visible Copilot UI instances across Microsoft Teams and Standalone Copilot.
+    Strictly filters out hidden, minimized, background, and lock-screen staging windows to never steal focus.
     Returns a list of (ctrl, btn, description) tuples.
     """
+    if is_workstation_locked():
+        return []
+
     hdesk = ensure_desktop_station(logger)
 
     top_hwnds = []
     def enum_top(hwnd, lparam):
         try:
+            # Must be a visible, non-minimized window
+            if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                return True
+
             length = user32.GetWindowTextLengthW(hwnd)
             title = ""
             if length > 0:
@@ -134,10 +157,11 @@ def find_all_copilot_instances(logger=None):
         child_hwnds = []
         def enum_child(ch, lparam):
             try:
-                cls_buff = ctypes.create_unicode_buffer(256)
-                user32.GetClassNameW(ch, cls_buff, 256)
-                if cls_buff.value in ('Chrome_RenderWidgetHostHWND', 'Intermediate D3D Window'):
-                    child_hwnds.append(ch)
+                if user32.IsWindowVisible(ch) and not user32.IsIconic(ch):
+                    cls_buff = ctypes.create_unicode_buffer(256)
+                    user32.GetClassNameW(ch, cls_buff, 256)
+                    if cls_buff.value in ('Chrome_RenderWidgetHostHWND', 'Intermediate D3D Window'):
+                        child_hwnds.append(ch)
             except Exception:
                 pass
             return True
@@ -147,14 +171,19 @@ def find_all_copilot_instances(logger=None):
             if ch in seen_hwnds:
                 continue
             try:
+                if not user32.IsWindowVisible(ch) or user32.IsIconic(ch):
+                    continue
                 ctrl = auto.ControlFromHandle(ch)
                 btn = ctrl.ButtonControl(AutomationId='gptModeSwitcher')
                 if not btn.Exists(0, 0):
                     btn = ctrl.ButtonControl(Name='Model Selector')
                 if btn.Exists(0, 0):
-                    seen_hwnds.add(ch)
-                    found.append((ctrl, btn, f"{cls} '{title}'"))
-                    break
+                    r = btn.BoundingRectangle
+                    # Validate that button is physically rendered on screen (not offscreen or zero-sized)
+                    if r.width() > 10 and r.height() > 10 and r.left > -1000 and r.top > -1000:
+                        seen_hwnds.add(ch)
+                        found.append((ctrl, btn, f"{cls} '{title}'"))
+                        break
             except Exception:
                 pass
 
@@ -222,11 +251,17 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
     """
     Checks if target_model is selected. If not, opens the dropdown and selects it.
     Executes in ~0.29s via unified multi-level popup hierarchy traversal.
+    Includes geometry safety checks to ensure it never interacts with hidden/off-screen windows.
     """
     if logger is None:
         logger = logging.getLogger("CopilotGuardian")
 
     try:
+        # Pre-check: Ensure button is physically visible on screen
+        r = btn.BoundingRectangle
+        if r.width() <= 10 or r.height() <= 10 or r.left < -1000 or r.top < -1000:
+            return False, ""
+
         current_text = get_current_model_name(btn)
 
         # Check if target is already active
@@ -397,7 +432,7 @@ def enforce_model_selection(doc, btn, target_model=DEFAULT_TARGET_MODEL, logger=
 
 
 def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_INTERVAL, log_file=DEFAULT_LOG_FILE, verbose=False):
-    """Continuous monitoring loop protecting ALL active Copilot instances simultaneously."""
+    """Continuous monitoring loop protecting ALL active, visible Copilot instances simultaneously."""
     logger = setup_logging(log_file, verbose)
 
     logger.info("=" * 65)
@@ -446,6 +481,8 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
 
     last_status = None
     cached_instances = []
+    failure_counts = {}
+    failure_cooldowns = {}
 
     while running:
         try:
@@ -454,11 +491,21 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
                 logger.info("Parent console window closed. Exiting...")
                 break
 
-            # Validate all cached instance handles
+            # If workstation is locked (lock screen, sleep, logon screen), pause gracefully
+            if is_workstation_locked():
+                if last_status != "LOCKED":
+                    logger.info("Workstation is locked — monitoring paused.")
+                    last_status = "LOCKED"
+                cached_instances = []
+                time.sleep(1.0)
+                continue
+
+            # Validate all cached instance handles (must still exist, be visible, and not minimized)
             valid_instances = []
             for ctrl, btn, desc in cached_instances:
                 try:
-                    if btn.Exists(0, 0):
+                    r = btn.BoundingRectangle
+                    if btn.Exists(0, 0) and r.width() > 10 and r.height() > 10 and r.left > -1000 and r.top > -1000:
                         valid_instances.append((ctrl, btn, desc))
                 except Exception:
                     pass
@@ -471,7 +518,12 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
 
             if cached_instances:
                 all_ok = True
+                now = time.time()
                 for ctrl, btn, desc in cached_instances:
+                    # Check failure cooldown to avoid focus-stealing loops
+                    if desc in failure_cooldowns and now < failure_cooldowns[desc]:
+                        continue
+
                     current_mode = get_current_model_name(btn)
                     if current_mode and not is_target_model_active(current_mode, target_model):
                         all_ok = False
@@ -479,14 +531,25 @@ def monitor_loop(target_model=DEFAULT_TARGET_MODEL, poll_interval=DEFAULT_POLL_I
                         ok, final_text = enforce_model_selection(ctrl, btn, target_model, logger)
                         if ok:
                             action_count += 1
+                            failure_counts[desc] = 0
+                            failure_cooldowns.pop(desc, None)
                             update_console_title(action_count)
                             logger.info(f"⚡ [ACTION #{action_count}] Successfully switched {desc} to '{final_text}' (Total Actions: {action_count})")
-                        last_status = "UPDATED"
+                            last_status = "UPDATED"
+                        else:
+                            fails = failure_counts.get(desc, 0) + 1
+                            failure_counts[desc] = fails
+                            if fails >= 3:
+                                failure_cooldowns[desc] = now + 5.0
+                                logger.warning(f"[{desc}] Model enforcement could not complete visually. Cooling down for 5s to avoid stealing focus...")
                     elif not current_mode:
                         # Handle stale -> force re-discovery on next loop
                         cached_instances = []
                         all_ok = False
                         break
+                    else:
+                        failure_counts[desc] = 0
+                        failure_cooldowns.pop(desc, None)
 
                 if all_ok and last_status != "OK":
                     active_desc = ", ".join([f"{d} ('{get_current_model_name(b)}')" for _, b, d in cached_instances])

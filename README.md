@@ -20,6 +20,8 @@ Just **download the folder** and double-click to start. No setup, no configurati
 ## 🎯 What It Does
 
 - **Multi-Instance Concurrent Protection** — Monitors and protects **Microsoft Teams Copilot** (both dedicated tab and chat channels) and **Standalone M365 Copilot** simultaneously.
+- **Lock-Screen & Session Safety** — Automatically pauses monitoring when workstation is locked, sleeping, or during logoff/logon to prevent false triggers.
+- **Zero Focus-Stealing Guarantee** — Strictly filters out hidden, minimized, and background staging windows; only interacts with visible on-screen windows and enforces backoff cooldowns.
 - **Real-Time Action Counter** — Dynamically tracks and displays the total number of enforcement actions directly in the CMD window title and live console output.
 - **Continuous Sub-Second Polling** — Checks UI state every `0.2s` with negligible CPU overhead (<0.1%).
 - **Instant Auto-Enforcement** — Switches non-target models back to **GPT 5.6 Think deeper** in **~0.29 seconds**.
